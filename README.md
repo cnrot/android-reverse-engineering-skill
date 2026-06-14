@@ -24,7 +24,11 @@ A Claude Code skill that decompiles Android APK/XAPK/JAR/AAR files and **extract
 
 | Capability | Description |
 |------------|-------------|
-| **Fingerprint first (Phase 0)** | Triage an APK/XAPK in seconds — detect the framework (Flutter / React Native / Cordova / Xamarin / native-Kotlin), HTTP stack, obfuscation level and native libs *before* spending time on a full decompile |
+| **Fingerprint first (Phase 0)** | Triage an APK/XAPK in seconds — detect the framework (Flutter / React Native / Cordova / Xamarin / native-Kotlin), HTTP stack, obfuscation level, native libs, **and reinforcement shell type** (360 Qihoo, Tencent legu, Baidu, Ijiami, etc.) *before* spending time on a full decompile |
+| **Dual decompile paths** | jadx→Java for normal APKs, apktool→smali for packed/reinforced APKs. Auto-detection with the right tool for the right situation. |
+| **Smali pipeline** | Full smali-level reverse engineering: decompile→scan for shell residuals→auto-clean 360/Tencent/Bangcle/Ijiami StubApp calls, native method stubs, duplicate move-result-object patterns, and manifest injections → rebuild→sign→install→test |
+| **Build & test cycle** | Single-command modify→build→sign→install→crash-check loop for rapid iteration on patched APKs |
+| **Unified error reporting** | All scripts output `ERROR:<code>:<context>:<message>`, `WARN:`, and `ACTION:` markers for AI-agent parsability with 6 standardized exit codes |
 | **Decompile** | APK, XAPK, JAR, and AAR files using jadx and Fernflower/Vineflower (single engine or side-by-side comparison) |
 | **Recover Kotlin names** | Rebuild original `*Repository` / `*ViewModel` / `*UseCase` class names from R8-obfuscated binaries using Kotlin metadata that R8 cannot strip |
 | **Extract APIs** | Retrofit, OkHttp, Volley **and modern Kotlin/KMP stacks: Ktor, Apollo (GraphQL), Koin DI** — endpoints, hardcoded URLs, auth headers, tokens and HMAC request-signing schemes |
@@ -41,8 +45,10 @@ A Claude Code skill that decompiles Android APK/XAPK/JAR/AAR files and **extract
 
 **Optional (recommended):**
 
+- [apktool](https://apktool.org/) — required for smali pipeline (packed/reinforced APKs)
 - [Vineflower](https://github.com/Vineflower/vineflower) or [Fernflower](https://github.com/JetBrains/fernflower) — better output on complex Java code
 - [dex2jar](https://github.com/ThexXTURBOXx/dex2jar) — needed to use Fernflower on APK/DEX files
+- [adb](https://developer.android.com/tools/adb) — needed for install/test cycle
 
 See `plugins/android-reverse-engineering/skills/android-reverse-engineering/references/setup-guide.md` for detailed installation instructions.
 
@@ -91,6 +97,30 @@ The skill activates on phrases like:
 - "Extract API endpoints from this app"
 - "Follow the call flow from LoginActivity"
 - "Analyze this AAR library"
+
+### Smali Pipeline for Packed/Reinforced APKs
+
+When the fingerprint detects a reinforcement shell (360, Tencent legu, Baidu, etc.), switch to the smali pipeline. Smali-level editing is the only reliable way to patch packed APKs.
+
+```bash
+# Decompile APK to smali (apktool)
+bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/decompile-smali.sh app.apk
+
+# Scan for shell residuals (multi-packer: 360/legu/Ijiami/Bangcle/Ali/NetEase + anti-tamper patterns)
+bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/scan-shell.sh app-smali/
+
+# Auto-clean shell residuals (options: --dry-run --backup --only-360 --only-native --only-manifest)
+bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/clean-shell.sh app-smali/
+
+# Build & sign
+bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/build-apk.sh app-smali/ -o output/app.apk
+
+# Install & launch & crash-check
+bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/install-apk.sh output/app-signed.apk -s 127.0.0.1:7555
+
+# Full test cycle: build → sign → install → launch → crash-check
+bash plugins/android-reverse-engineering/skills/android-reverse-engineering/scripts/test-cycle.sh app-smali/ -p com.example.app
+```
 
 ### Manual scripts
 
@@ -166,7 +196,7 @@ android-reverse-engineering-skill/
 │       │   └── plugin.json                 # Plugin manifest
 │       ├── skills/
 │       │   └── android-reverse-engineering/
-│       │       ├── SKILL.md                # Core workflow (Phase 0–5)
+│       │       ├── SKILL.md                # Core workflow (Phase 0–6)
 │       │       ├── references/
 │       │       │   ├── setup-guide.md
 │       │       │   ├── jadx-usage.md
@@ -176,13 +206,20 @@ android-reverse-engineering-skill/
 │       │       │   ├── third_party_hosts.txt   # denylist for first/third-party bucketing
 │       │       │   └── call-flow-analysis.md
 │       │       └── scripts/
-│       │           ├── check-deps.sh       # Bash
-│       │           ├── check-deps.ps1      # PowerShell
+│       │           ├── _errors.sh            # Shared error codes + reporting (sourced by all scripts)
+│       │           ├── check-deps.sh         # Bash
+│       │           ├── check-deps.ps1        # PowerShell
 │       │           ├── install-dep.sh
 │       │           ├── install-dep.ps1
-│       │           ├── decompile.sh
+│       │           ├── decompile.sh          # jadx/fernflower decompile (--disable-plugins jadx-ai-mcp)
 │       │           ├── decompile.ps1
-│       │           ├── fingerprint.sh          # Phase 0 — pre-decompile triage
+│       │           ├── decompile-smali.sh    # NEW: apktool → smali for reinforced APKs
+│       │           ├── fingerprint.sh        # Phase 0 — pre-decompile triage + shell detection
+│       │           ├── scan-shell.sh         # NEW: multi-packer shell residual scanner (7+ packers)
+│       │           ├── clean-shell.sh        # NEW: auto-clean 360/Ijiami/Bangcle/legu residuals
+│       │           ├── build-apk.sh          # NEW: apktool build + jarsigner
+│       │           ├── install-apk.sh        # NEW: adb install + launch + crash/ANR/native-crash check
+│       │           ├── test-cycle.sh         # NEW: full modify→build→sign→install→test loop
 │       │           ├── recover-kotlin-names.sh # R8 → real Kotlin class names
 │       │           ├── lookup-name.sh          # query the recovered name map
 │       │           ├── find-api-calls.sh
