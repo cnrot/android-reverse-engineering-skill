@@ -203,6 +203,11 @@ echo "BuildConfig:      $BUILDCONFIG"
 echo
 echo "Third-party SDKs: ${sdks[*]:-none detected}"
 echo
+echo "Reinforcement:     ${SHELL_TYPE}"
+if [[ "$SHELL_TYPE" != "none" ]]; then
+  echo "  Marker:          ${SHELL_MARKER}"
+fi
+echo
 echo "Native libraries (consolidated across splits):"
 if [[ -n "$NATIVE" ]]; then
   echo "$NATIVE" | sed 's/^/  /'
@@ -210,6 +215,58 @@ else
   echo "  (none)"
 fi
 echo
+
+# ----------------------------------------------------------------------
+# Reinforcement / Packing shell detection
+# Detects 360 (Qihoo), Tencent legu, and other common Android packers.
+# These leave characteristic markers even after de-shelling — detecting
+# them early guides the choice between jadx→Java vs apktool→smali paths.
+# ----------------------------------------------------------------------
+SHELL_TYPE="none"
+SHELL_MARKER=""
+
+# 360 reinforcement: StubApp references in dex strings + obfuscated shell packages
+if grep -qE 'Lcom/stub/StubApp;' "$DEX_STRINGS" 2>/dev/null; then
+  SHELL_TYPE="360 (Qihoo)"
+  SHELL_MARKER="StubApp references found in DEX strings"
+elif has '^assets/libjiagu\.so$' || has '^assets/libjiagu_a64\.so$' || has '^assets/libjiagu_x86\.so$' || has '^assets/libjiagu_x64\.so$' || has '^assets/to-oate\.dat$' || has '^assets/ooo\.dat$'; then
+  SHELL_TYPE="360 (Qihoo) - active shell"
+  shell_reasons=()
+  has '^assets/libjiagu\.so$'         && shell_reasons+=("libjiagu.so present")
+  has '^assets/libjiagu_a64\.so$'     && shell_reasons+=("libjiagu_a64.so present")
+  has '^assets/to-oate\.dat$'         && shell_reasons+=("to-oate.dat present")
+  has '^assets/ooo\.dat$'             && shell_reasons+=("ooo.dat present")
+  SHELL_MARKER="${shell_reasons[*]}"
+# Tencent legu / Security SDK
+elif has 'libshella-' || has 'libshellx-' || has 'libtup.so' || has 'liblegus.so'; then
+  SHELL_TYPE="Tencent legu"
+  SHELL_MARKER="Tencent security library found"
+elif has '^lib/.*/libbaiduprotect\.so$'; then
+  SHELL_TYPE="Baidu reinforcement"
+  SHELL_MARKER="libbaiduprotect.so present"
+elif has '^lib/.*/libnqshield\.so$' || has '^assets/NQ/Secure'; then
+  SHELL_TYPE="NetQin Shield"
+  SHELL_MARKER="NetQin security markers found"
+elif has '^lib/.*/libegis\.so$'; then
+  SHELL_TYPE="Egis / Ijiami"
+  SHELL_MARKER="libegis.so present"
+elif has '^lib/.*/libapkprotect\.so$'; then
+  SHELL_TYPE="APKProtect / Bangcle"
+  SHELL_MARKER="libapkprotect.so present"
+fi
+
+# Heuristic: native method stubs + obfuscated single-letter packages → likely reinforced
+if [[ "$SHELL_TYPE" == "none" ]]; then
+  short_dirs_count=$(grep -c '^[a-z]/' "$LISTING" 2>/dev/null || echo 0)
+  ndbdarm_count=$(grep -c 'ndbdarm' "$DEX_STRINGS" 2>/dev/null || echo 0)
+  stub_smells=()
+  [[ "$ndbdarm_count" -gt 5 ]] && stub_smells+=("ndbdarm obfuscated classes ($ndbdarm_count)")
+  [[ "$short_dirs_count" -gt 50 ]] && stub_smells+=("$short_dirs_count single-char root dirs")
+  if [[ ${#stub_smells[@]} -gt 1 ]]; then
+    SHELL_TYPE="likely packed (heuristic)"
+    SHELL_MARKER="${stub_smells[*]}"
+  fi
+fi
 
 # ----------------------------------------------------------------------
 # Recommendation
@@ -236,6 +293,16 @@ case "$FRAMEWORK" in
     echo "  jadx will only show the Mono host."
     ;;
   *)
-    echo "  Proceed with Phase 2: bash scripts/decompile.sh <file>"
+    if [[ "$SHELL_TYPE" != "none" ]]; then
+      echo "  Warning: ${SHELL_TYPE} reinforcement detected."
+      echo "  For de-shelled/packed APKs, prefer the smali pipeline:"
+      echo "    Phase 2.5: bash scripts/decompile-smali.sh <file>"
+      echo "    Phase 2.6: bash scripts/scan-shell.sh <output-dir>"
+      echo "    Phase 2.7: bash scripts/clean-shell.sh <output-dir>"
+      echo "  For normal (non-packed) APKs:"
+      echo "    Phase 2: bash scripts/decompile.sh <file>"
+    else
+      echo "  Proceed with Phase 2: bash scripts/decompile.sh <file>"
+    fi
     ;;
 esac

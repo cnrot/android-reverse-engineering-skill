@@ -86,6 +86,19 @@ case "$ENGINE" in
     ;;
 esac
 
+# --- Non-ASCII filename detection ---
+# Chinese/Unicode characters in filenames can cause jadx output path issues.
+# Auto-copy to an ASCII-safe temporary path if non-ASCII detected.
+if echo "$INPUT_FILE" | grep -qP '[^\x00-\x7F]' 2>/dev/null; then
+  ASCII_SAFE=$(echo "$INPUT_FILE" | tr -dc '[:alnum:]._-' | sed 's/[^[:alnum:]._-]/_/g')
+  ASCII_SAFE="$(dirname "$INPUT_FILE")/${ASCII_SAFE%.*}_safe.${ext_lower}"
+  echo "Warning: Non-ASCII characters in filename: $INPUT_FILE"
+  echo "  Auto-renaming to ASCII-safe: $(basename "$ASCII_SAFE")"
+  cp "$INPUT_FILE" "$ASCII_SAFE"
+  ORIGINAL_INPUT="$INPUT_FILE"
+  INPUT_FILE="$ASCII_SAFE"
+fi
+
 BASENAME=$(basename "$INPUT_FILE" ".$ext_lower")
 INPUT_FILE_ABS=$(realpath "$INPUT_FILE")
 
@@ -175,6 +188,8 @@ run_jadx() {
   args+=("-d" "$out_dir")
   [[ "$DEOBF" == true ]] && args+=("--deobf")
   [[ "$NO_RES" == true ]] && args+=("--no-res")
+  # Disable AI-MCP plugin (if bundled) to prevent HTTP server blocking CLI exit
+  args+=("--disable-plugins" "jadx-ai-mcp")
   args+=("--show-bad-code")
   args+=("$INPUT_FILE_ABS")
 

@@ -7,6 +7,26 @@ trigger: decompile APK|decompile XAPK|reverse engineer Android|extract API|analy
 
 Decompile Android APK, XAPK, JAR, and AAR files using jadx and Fernflower/Vineflower, trace call flows through application code and libraries, and produce structured documentation of extracted APIs. Two decompiler engines are supported — jadx for broad Android coverage and Fernflower for higher-quality output on complex Java code — and can be used together for comparison.
 
+## Error Reporting Convention
+
+All scripts follow a unified error reporting convention designed for AI-agent readability:
+
+| Exit Code | Name | Meaning | Recovery |
+|-----------|------|---------|----------|
+| 0 | SUCCESS | Operation completed | — |
+| 1 | USER_ERROR | Bad input, file missing, invalid args | Fix the command syntax |
+| 2 | TOOL_MISSING | Required tool not installed | Run `install-dep.sh <tool>` |
+| 3 | TOOL_ERROR | Tool execution failed | Check error output, fix smali/config |
+| 4 | VERIFY_FAIL | Post-build crash/ANR/native-crash | Check smali modifications |
+| 5 | SHELL_DETECTED | Shell residuals found (non-fatal) | Run `clean-shell.sh` |
+
+**Machine-readable output markers** (on stderr):
+- `ERROR:<code>:<context>:<message>` — Fatal error, blocks continuation
+- `WARN:<context>:<message>` — Non-fatal warning, does not block
+- `ACTION:<suggested-command>` — Proposed next step for recovery
+
+AI agents should parse `ERROR:` and `WARN:` prefixes to understand what went wrong and `ACTION:` for remediation guidance.
+
 ## Prerequisites
 
 This skill requires **Java JDK 17+** and **jadx** to be installed. **Fernflower/Vineflower** and **dex2jar** are optional but recommended for better decompilation quality. Run the dependency checker to verify:
@@ -48,6 +68,36 @@ It prints, in one screen:
 If the fingerprint says the app is Flutter / RN / Cordova / Xamarin, **stop**
 and switch to the framework-appropriate tooling. Phases 1–5 below assume a
 native (Java/Kotlin) Android app.
+
+### Phase 0.5: Reinforcement Shell Detection
+
+The fingerprint script now detects common Android packing/reinforcement shells (360 Qihoo, Tencent legu, Baidu, NetQin, etc.) by scanning for:
+
+- **Shell library markers** (libjiagu.so, libshella-*.so, libbaiduprotect.so, etc.)
+- **StubApp references** in DEX strings (360 de-shelled residual)
+- **Heuristic indicators**: ndbdarm obfuscated classes, excessive single-letter root packages
+
+**If a shell is detected**, the recommended path shifts from jadx→Java to **apktool→smali**:
+
+```
+Phase 0.5 (fingerprint):  bash scripts/fingerprint.sh <file.apk>
+  ↓ if shell detected
+Phase 2.5 (smali decompile):  bash scripts/decompile-smali.sh <file.apk>
+Phase 2.6 (scan residuals):   bash scripts/scan-shell.sh <output-dir>
+Phase 2.7 (clean residuals):  bash scripts/clean-shell.sh <output-dir>
+Phase 6   (build & test):     bash scripts/test-cycle.sh <source-dir>
+```
+
+For non-packed APKs, continue with the standard jadx→Java pipeline below.
+
+**When to use smali vs jadx**:
+
+| Situation | Path |
+|---|---|
+| Shell detected (360, legu, etc.) | smali pipeline (Phase 2.5–2.7) |
+| App already de-shelled but has residual StubApp/native stubs | smali pipeline |
+| Normal APK, no packing | jadx pipeline (Phase 2) |
+| Need to modify and rebuild APK | Always use smali pipeline |
 
 ### Phase 1: Verify and Install Dependencies
 
@@ -130,6 +180,69 @@ When using `--engine both`, the outputs go into `<output>/jadx/` and `<output>/f
 For APK files with Fernflower, the script automatically uses dex2jar as an intermediate step. dex2jar must be installed for this to work.
 
 See `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/jadx-usage.md` and `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/fernflower-usage.md` for the full CLI references.
+
+### Phase 2.5: Smali Decompilation (for reinforced/packed APKs)
+
+When the fingerprint detects a reinforcement shell, or when you need to modify and rebuild the APK, use apktool to decompile to smali (DEX assembly) instead of jadx→Java. Smali-level editing is the only reliable way to patch reinforced APKs.
+
+**Action**: Run the smali decompile script.
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/decompile-smali.sh [-o <dir>] <file.apk>
+```
+
+The script:
+- Resolves apktool from `$APKTOOL_JAR` env var, `tools/apktool_3.0.2.jar` (project local), or PATH
+- Decompiles all DEX to smali (smali/, smali_classes2/ ... smali_classesN/)
+- Decodes resources (res/), manifest, assets, and native libraries
+- Outputs to `<filename>-smali/` by default
+
+### Phase 2.6: Scan for Shell Residuals
+
+After smali decompilation, scan for reinforcement shell residuals that must be cleaned before rebuilding.
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/scan-shell.sh <smali-dir>
+```
+
+Detects:
+- **StubApp references** (360 residual) — `Lcom/stub/StubApp;` calls in smali
+- **Native method stubs** — `native onCreate` and other methods replaced by 360
+- **Obfuscated shell packages** — ndbdarm, com/muhuaya, yz/local
+- **Manifest injections** — fake resource types (invalid16), ndbdarm providers
+- Exit code 1 if residuals found, 0 if clean.
+
+### Phase 2.7: Clean Shell Residuals
+
+Automatically remove 360 (Qihoo) reinforcement residuals from smali.
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/clean-shell.sh <smali-dir>
+```
+
+This script performs 5 cleaning passes:
+1. **Remove StubApp invocations**: `interface11(I)V`, `getOrigApplicationContext(Context)Context`, `interface22`, `interface24`, `interface12(DexFile)Enumeration` → `DexFile.entries()`
+2. **Fix duplicate move-result-object**: leftover from `getOrigApplicationContext` removal when `.line` annotations separate invoke from move-result
+3. **Fix native onCreate stubs**: replace `native` modifier with `invoke-super` to parent class
+4. **Clean manifest injections**: remove ndbdarm.o/mg/mh entries, fake resource types (invalid16), delete res/invalid*/ directories
+5. **Clean const leftovers**: remove orphaned `const vX, 0xNNNN` from removed interface11 calls
+
+**Options**:
+- `--dry-run` — Preview changes without modifying files
+- `--backup` — Create .bak backups before modifying
+- `--only-360` — Clean only 360 StubApp residuals
+- `--only-native` — Fix only native method stubs
+- `--only-manifest` — Clean only manifest injections
+
+Supports multiple packers: 360 Qihoo, Ijiami, Bangcle/SecNeo, Tencent legu, Baidu.
+
+**Typical results** (from real-world 360-packed 45MB APK):
+| Pass | Items Cleaned |
+|------|--------------|
+| StubApp calls | ~294 (93 interface11 + 188 getOrigApplicationContext + 13 others) |
+| Duplicate move-result | ~134 files |
+| Native onCreate | 29 classes |
+| Manifest entries | 3-5 entries |
 
 ### Phase 3: Analyze Structure
 
@@ -294,6 +407,40 @@ on auth + 1-2 key flows is what most consumers of this work actually want.
 
 See `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/api-extraction-patterns.md` for library-specific search patterns and the full documentation template.
 
+### Phase 6: Build, Sign, Install & Test (Smali Pipeline)
+
+When working with the smali pipeline (Phase 2.5–2.7), use these scripts to rebuild and test modified APKs.
+
+#### 6.1 Build & Sign
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/build-apk.sh <smali-dir> [-o <output.apk>] [-k <keystore>]
+```
+
+Rebuilds APK from smali source with apktool, then signs with jarsigner. Default output: `output/<dir>-signed.apk`. Resolves keystore from `tools/debug.keystore` or `debug.keystore` (project-local).
+
+#### 6.2 Install & Test
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/install-apk.sh <signed.apk> [-s <device>] [-p <package>] [-a <activity>]
+```
+
+Installs APK to device/emulator, launches the app, waits 5 seconds, and checks logcat for `FATAL EXCEPTION` crashes. Reports [OK] or [FAIL] with crash logs.
+
+#### 6.3 Full Test Cycle
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/test-cycle.sh <smali-dir> [-p <package>] [-a <activity>] [-s <device>]
+```
+
+Single command that runs the complete modify→build→sign→install→launch→crash-check loop. Ideal for rapid iteration during reverse engineering.
+
+**Quick reference** (from real-world workflow):
+```bash
+# After modifying smali files in source/
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/test-cycle.sh source -p cn.education.online -a cn.education.online.ui.activity.LaunchActivity -s 127.0.0.1:7555
+```
+
 ## Output
 
 At the end of the workflow, deliver:
@@ -310,3 +457,16 @@ At the end of the workflow, deliver:
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/fernflower-usage.md` — Fernflower/Vineflower CLI options, when to use, APK workflow
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/api-extraction-patterns.md` — Library-specific search patterns and documentation template
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/call-flow-analysis.md` — Techniques for tracing call flows in decompiled code
+
+## Smali Pipeline for Reinforced APKs
+
+When working with packed/reinforced APKs (360, Tencent legu, etc.), the standard jadx→Java pipeline is often insufficient. Use the smali pipeline instead:
+
+```
+Phase 0:   fingerprint.sh <apk>            # Detect shell type
+Phase 2.5: decompile-smali.sh <apk>         # apktool → smali
+Phase 2.6: scan-shell.sh <dir>              # Find residuals
+Phase 2.7: clean-shell.sh <dir>             # Remove residuals
+  [modify smali as needed]
+Phase 6:   test-cycle.sh <dir>              # Build → sign → install → test
+```
