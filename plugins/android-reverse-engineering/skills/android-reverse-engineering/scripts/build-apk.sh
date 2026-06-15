@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build-apk.sh — Rebuild APK from smali source + sign
 # Supports: debug/release signing, auto keystore generation, build validation
+# CRITICAL: ALWAYS clears source/build before rebuild to prevent old dex reuse
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_errors.sh"
@@ -12,6 +13,8 @@ KEYSTORE_PASS=""
 KEYSTORE_ALIAS=""
 SIGN_MODE="debug"
 
+echo "[build-apk] ALWAYS clearing source/build cache first..."
+rm -rf "$SMALI_DIR/build" 2>/dev/null || true
 shift 2>/dev/null || true
 while [[ $# -gt 0 ]]; do
   case "$1" in
