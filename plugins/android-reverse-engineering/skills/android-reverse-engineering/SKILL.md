@@ -470,3 +470,55 @@ Phase 2.7: clean-shell.sh <dir>             # Remove residuals
   [modify smali as needed]
 Phase 6:   test-cycle.sh <dir>              # Build → sign → install → test
 ```
+
+## Golden Rules from Real-World Battle Testing
+
+### Rule 1: ALWAYS Use jadx + apktool Together
+
+**Never work in smali alone.** The standard workflow is a two-stage process:
+
+1. **jadx first** — decompile the APK/DEX to readable Java to understand the architecture, trace call chains, and identify key classes
+2. **apktool/smali second** — make precise bytecode-level modifications based on the Java analysis
+
+Working exclusively in smali (42,000+ smali files) is like performing surgery blindfolded. jadx gives you the "map" — readable Java method names, control flow, and class relationships. smali is the "scalpel" — the only format you can edit and rebuild.
+
+**Real case**: An agent spent 4+ hours failing to locate a payment dialog in smali, making 22 failed build attempts. Switching to jadx for analysis + smali for editing solved it in 2 rounds.
+
+### Rule 2: ALWAYS Clear the apktool Build Cache Before Rebuilding
+
+```
+rm -rf source/build
+java -jar apktool.jar b source -f -o output.apk
+```
+
+Apktool stores compiled `.dex` files in `source/build/apk/`. These cached files are reused across builds, even when smali source files have been modified. This is the **#1 cause of "I changed the code but the APK still has old behavior"**.
+
+**Verification step**: After building, ALWAYS search the output APK binary for the strings/code you expect to be removed:
+```bash
+python -c "data = open('output.apk','rb').read(); print('FOUND' if b'deleted_class' in data else 'CLEAN')"
+```
+
+### Rule 3: Third-Party Payment/Verification SDKs Are Common
+
+Many repackaged APKs contain third-party payment SDKs that are:
+- Completely isolated in a single dex file (usually the last one, e.g., classes11.dex)
+- Zero-coupled with the main app code (no imports from main app)
+- Activated via ActivityLifecycleCallbacks, ContentProvider auto-start, or runtime plugin download
+
+**Detection checklist** (use `scan-shell.sh` or manual search):
+- `showType`, `payChannel`, `autoTrial`, `packId` in smali — payment config fields
+- Cloudflare IPs (`104.19.*`, `104.18.*`, `172.64.*`) — DNS bypass mechanism
+- `ContentProvider` + `ActivityLifecycleCallbacks` on same class — auto-start pattern
+- `.apk` download strings in plugin framework code — runtime plugin replacement
+
+### Rule 4: Verify Changes at the Binary Level
+
+Smali-level verification is NOT sufficient. Always verify at the APK binary level:
+```bash
+# Check if payment code is truly gone from the built APK
+python -c "data=open('output.apk','rb').read(); [print(f'FOUND: {t}') for t in [b'ndbdarm',b'muhuaya',b'gxogyub',b'zhongzhipian'] if t in data]"
+```
+
+### Rule 5: HTTP Packet Capture Reveals What Code Search Cannot
+
+Direct IP connections, DNS-resolved addresses, and runtime-constructed URLs may not appear as plain strings in any smali file. Use `adb shell` + packet capture tools (or the phone's HTTP proxy/VPN capture) on a running APK to discover the actual network connections.
