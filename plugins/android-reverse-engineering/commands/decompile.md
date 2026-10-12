@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash, Read, Glob, Grep, Write, Edit
+allowed-tools: Bash(bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/check-deps.sh), Bash(bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/decompile.sh *), Read, Glob, Grep
 description: Decompile an Android APK/XAPK/JAR/AAR and analyze its structure
 user-invocable: true
 argument-hint: <path to APK, XAPK, JAR, or AAR file>
